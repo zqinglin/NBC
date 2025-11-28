@@ -2,7 +2,7 @@ import argparse
 import os
 from datasets import load_dataset, Dataset
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig, Trainer, DataCollatorForLanguageModeling
 from trl import SFTTrainer
 from peft import LoraConfig, TaskType, get_peft_model
 
@@ -88,12 +88,30 @@ def main():
     if slot not in getattr(model, "peft_config", {}):
         model.add_adapter(slot, lcfg)
     model.set_adapter(slot)
-    train_args = TrainingArguments(output_dir=os.path.join(args.output_dir, "_tmp"), per_device_train_batch_size=4, learning_rate=2e-4, num_train_epochs=1, max_steps=args.max_steps, logging_steps=10, gradient_accumulation_steps=1, save_strategy="no")
+    train_args = TrainingArguments(
+        output_dir=os.path.join(args.output_dir, "_tmp"),
+        per_device_train_batch_size=4,
+        learning_rate=2e-4,
+        max_steps=args.max_steps,
+        logging_steps=10,
+        gradient_accumulation_steps=1,
+        save_strategy="no",
+        bf16=(str(args.dtype).lower() == "bf16"),
+        fp16=(str(args.dtype).lower() == "fp16"),
+        dataloader_num_workers=2,
+        report_to=[],
+    )
     dataset = Dataset.from_dict({"text": texts})
+    trainer = None
     try:
-        trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
+        trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, dataset_text_field="text", max_seq_length=1024)
     except TypeError:
-        trainer = SFTTrainer(model=model, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
+        try:
+            trainer = SFTTrainer(model=model, train_dataset=dataset, args=train_args, dataset_text_field="text")
+        except TypeError:
+            tokenized = dataset.map(lambda x: tok(x["text"], truncation=True, max_length=1024), batched=True, remove_columns=dataset.column_names)
+            collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False)
+            trainer = Trainer(model=model, args=train_args, train_dataset=tokenized, data_collator=collator)
     trainer.train()
     save_path = os.path.join(args.output_dir, slot)
     os.makedirs(save_path, exist_ok=True)
