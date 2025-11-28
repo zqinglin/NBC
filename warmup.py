@@ -90,7 +90,10 @@ def main():
     model.set_adapter(slot)
     train_args = TrainingArguments(output_dir=os.path.join(args.output_dir, "_tmp"), per_device_train_batch_size=4, learning_rate=2e-4, num_train_epochs=1, max_steps=args.max_steps, logging_steps=10, gradient_accumulation_steps=1, save_strategy="no")
     dataset = Dataset.from_dict({"text": texts})
-    trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
+    try:
+        trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
+    except TypeError:
+        trainer = SFTTrainer(model=model, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
     trainer.train()
     save_path = os.path.join(args.output_dir, slot)
     os.makedirs(save_path, exist_ok=True)
