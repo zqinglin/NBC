@@ -4,8 +4,11 @@ from peft import LoraConfig, TaskType, get_peft_model
 from thalamus import KAB_Thalamus
 
 
+from transformers import BitsAndBytesConfig
+
+
 class NeuroBayesianAgent:
-    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B-Instruct", slots=None, lora_r=16, quantization="4bit", force_download=False, resume_download=True, cache_dir=None, dtype="bf16"):
+    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B-Instruct", slots=None, lora_r=16, quantization="16bit", force_download=False, resume_download=True, cache_dir=None, dtype="bf16"):
         if slots is None:
             slots = ["logic", "coder", "creative", "persona", "working"]
         self.slots = list(slots)
@@ -16,12 +19,15 @@ class NeuroBayesianAgent:
         load_args = {"force_download": force_download, "resume_download": resume_download}
         if cache_dir is not None:
             load_args.update({"cache_dir": cache_dir})
-        if quantization == "4bit":
-            load_args.update({"load_in_4bit": True, "device_map": "auto"})
+        if str(quantization).lower() == "4bit":
+            bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
+            load_args.update({"quantization_config": bnb_cfg, "device_map": "auto"})
+            base = AutoModelForCausalLM.from_pretrained(model_name, **load_args)
         else:
             dt = torch.bfloat16 if str(dtype).lower() == "bf16" else torch.float16
-            load_args.update({"torch_dtype": dt, "device_map": "auto"})
-        base = AutoModelForCausalLM.from_pretrained(model_name, **load_args)
+            load_args.update({"dtype": dt, "device_map": None})
+            base = AutoModelForCausalLM.from_pretrained(model_name, **load_args)
+            base.to(self.device)
         base.train(False)
         for p in base.parameters():
             p.requires_grad = False
@@ -81,7 +87,7 @@ class NeuroBayesianAgent:
     def _active_params(self, slot):
         ps = []
         for n, p in self.model.named_parameters():
-            use = ("lora_" in n)
+            use = ("lora_" in n) and (slot in n or ("." + slot) in n)
             p.requires_grad = use
             if use:
                 ps.append(p)

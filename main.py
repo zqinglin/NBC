@@ -11,7 +11,7 @@ def run_once(agent, prompt, ttt_steps, threshold, lr, max_new_tokens):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="meta-llama/Meta-Llama-3-8B-Instruct")
-    p.add_argument("--quant", default="4bit")
+    p.add_argument("--quant", default="16bit")
     p.add_argument("--cache_dir", default=None)
     p.add_argument("--force_download", action="store_true")
     p.add_argument("--resume_download", action="store_true")

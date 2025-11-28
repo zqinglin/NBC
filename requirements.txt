@@ -4,4 +4,6 @@ accelerate>=0.34.2
 sentencepiece>=0.1.99
 safetensors>=0.4.3
 numpy>=1.26.0
-bitsandbytes>=0.43.1; platform_system != "Windows"
+bitsandbytes>=0.43.1
+trl>=0.9.4
+datasets>=2.19.0

@@ -1,8 +1,8 @@
 import argparse
 import os
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig
 from trl import SFTTrainer
 from peft import LoraConfig, TaskType, get_peft_model
 
@@ -53,6 +53,8 @@ def main():
     ap.add_argument("--output_dir", default="./saved_slots")
     ap.add_argument("--max_steps", type=int, default=100)
     ap.add_argument("--model", default="meta-llama/Meta-Llama-3-8B-Instruct")
+    ap.add_argument("--quant", default="16bit")
+    ap.add_argument("--dtype", default="bf16")
     args = ap.parse_args()
     slot = args.slot_name
     mapping = DATASET_MAPPING.get(slot)
@@ -71,7 +73,13 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     if tok.pad_token_id is None:
         tok.pad_token_id = tok.eos_token_id
-    base = AutoModelForCausalLM.from_pretrained(args.model, load_in_4bit=True, device_map="auto")
+    if str(args.quant).lower() == "4bit":
+        bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
+        base = AutoModelForCausalLM.from_pretrained(args.model, quantization_config=bnb_cfg, device_map="auto")
+    else:
+        dt = torch.bfloat16 if str(args.dtype).lower() == "bf16" else torch.float16
+        base = AutoModelForCausalLM.from_pretrained(args.model, dtype=dt)
+        base.to(device)
     base.train(False)
     for p in base.parameters():
         p.requires_grad = False
@@ -81,10 +89,8 @@ def main():
         model.add_adapter(slot, lcfg)
     model.set_adapter(slot)
     train_args = TrainingArguments(output_dir=os.path.join(args.output_dir, "_tmp"), per_device_train_batch_size=4, learning_rate=2e-4, num_train_epochs=1, max_steps=args.max_steps, logging_steps=10, gradient_accumulation_steps=1, save_strategy="no")
-    def formatting_func(batch):
-        return batch["text"]
-    dataset = {"text": texts}
-    trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, formatting_func=lambda x: x)
+    dataset = Dataset.from_dict({"text": texts})
+    trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, dataset_text_field="text")
     trainer.train()
     save_path = os.path.join(args.output_dir, slot)
     os.makedirs(save_path, exist_ok=True)
@@ -93,4 +99,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
