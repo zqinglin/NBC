@@ -1,0 +1,96 @@
+import argparse
+import os
+from datasets import load_dataset
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
+from trl import SFTTrainer
+from peft import LoraConfig, TaskType, get_peft_model
+
+
+DATASET_MAPPING = {
+    "logic": {
+        "path": "microsoft/orca-math-word-problems-200k",
+        "prompt_col": "question",
+        "response_col": "answer",
+    },
+    "coder": {
+        "path": "nickrosh/Evol-Instruct-Code-80k-v1",
+        "prompt_col": "instruction",
+        "response_col": "output",
+    },
+    "persona": {
+        "path": "Proj-Persona/Persona-Instruct",
+        "prompt_col": "instruction",
+        "response_col": "output",
+    },
+    "creative": {
+        "path": "HuggingFaceH4/no_robots",
+        "prompt_col": "prompt",
+        "response_col": "messages",
+    },
+}
+
+
+def format_examples(ds, prompt_col, response_col):
+    out = []
+    for ex in ds:
+        p = ex.get(prompt_col, "")
+        r = ex.get(response_col, "")
+        if isinstance(r, list):
+            if len(r) and isinstance(r[0], dict):
+                r = "\n".join([str(m.get("content", "")) for m in r])
+            else:
+                r = "\n".join([str(x) for x in r])
+        text = f"Instruction: {str(p)}\nResponse: {str(r)}"
+        out.append(text)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--slot_name", required=True)
+    ap.add_argument("--dataset_name", default=None)
+    ap.add_argument("--output_dir", default="./saved_slots")
+    ap.add_argument("--max_steps", type=int, default=100)
+    ap.add_argument("--model", default="meta-llama/Meta-Llama-3-8B-Instruct")
+    args = ap.parse_args()
+    slot = args.slot_name
+    mapping = DATASET_MAPPING.get(slot)
+    ds_path = args.dataset_name or (mapping["path"] if mapping else None)
+    if ds_path is None:
+        raise RuntimeError("dataset_name is required for unknown slot")
+    ds = load_dataset(ds_path, split="train")
+    prompt_col = mapping["prompt_col"] if mapping else None
+    response_col = mapping["response_col"] if mapping else None
+    if prompt_col is None or response_col is None:
+        cols = list(ds.features.keys())
+        prompt_col = prompt_col or ("instruction" if "instruction" in cols else cols[0])
+        response_col = response_col or ("output" if "output" in cols else cols[-1])
+    texts = format_examples(ds, prompt_col, response_col)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tok = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    if tok.pad_token_id is None:
+        tok.pad_token_id = tok.eos_token_id
+    base = AutoModelForCausalLM.from_pretrained(args.model, load_in_4bit=True, device_map="auto")
+    base.train(False)
+    for p in base.parameters():
+        p.requires_grad = False
+    lcfg = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type=TaskType.CAUSAL_LM, target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+    model = get_peft_model(base, lcfg)
+    if slot not in getattr(model, "peft_config", {}):
+        model.add_adapter(slot, lcfg)
+    model.set_adapter(slot)
+    train_args = TrainingArguments(output_dir=os.path.join(args.output_dir, "_tmp"), per_device_train_batch_size=4, learning_rate=2e-4, num_train_epochs=1, max_steps=args.max_steps, logging_steps=10, gradient_accumulation_steps=1, save_strategy="no")
+    def formatting_func(batch):
+        return batch["text"]
+    dataset = {"text": texts}
+    trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=dataset, args=train_args, max_seq_length=1024, formatting_func=lambda x: x)
+    trainer.train()
+    save_path = os.path.join(args.output_dir, slot)
+    os.makedirs(save_path, exist_ok=True)
+    model.save_pretrained(save_path)
+
+
+if __name__ == "__main__":
+    main()
+
