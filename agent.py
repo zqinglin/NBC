@@ -130,7 +130,12 @@ class NeuroBayesianAgent:
 
     def sleep_consolidate(self, decay=0.1):
         for s in self.slots:
-            curr = self.model.get_adapter_state_dict(s)
+            self.model.set_adapter(s)
+            try:
+                curr = self.model.get_adapter_state_dict(s)
+            except Exception:
+                full_sd = self.model.state_dict()
+                curr = {k: v for k, v in full_sd.items() if ("lora_" in k) and (s in k or ("." + s) in k)}
             curr_cpu = {k: v.detach().cpu() for k, v in curr.items()}
             if s == "working":
                 zero_state = {k: torch.zeros_like(v) for k, v in curr_cpu.items()}
@@ -143,3 +148,4 @@ class NeuroBayesianAgent:
                     upd[k] = (1.0 - decay) * sh[k] + decay * curr_cpu[k]
                 self.shadow_weights[s] = upd
                 self.model.load_state_dict(upd, strict=False)
+        self.model.set_adapter(self.slots[0])
