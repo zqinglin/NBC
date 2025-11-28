@@ -10,23 +10,21 @@ from peft import LoraConfig, TaskType, get_peft_model
 DATASET_MAPPING = {
     "logic": {
         "path": "microsoft/orca-math-word-problems-200k",
+        "subset": None,
         "prompt_col": "question",
         "response_col": "answer",
     },
     "coder": {
         "path": "nickrosh/Evol-Instruct-Code-80k-v1",
+        "subset": None,
         "prompt_col": "instruction",
         "response_col": "output",
     },
     "persona": {
-        "path": "Proj-Persona/Persona-Instruct",
-        "prompt_col": "instruction",
-        "response_col": "output",
-    },
-    "creative": {
-        "path": "HuggingFaceH4/no_robots",
-        "prompt_col": "prompt",
-        "response_col": "messages",
+        "path": "proj-persona/PersonaHub",
+        "subset": "instruction",
+        "prompt_col": "input persona",
+        "response_col": "synthesized text",
     },
 }
 
@@ -58,16 +56,20 @@ def main():
     args = ap.parse_args()
     slot = args.slot_name
     mapping = DATASET_MAPPING.get(slot)
-    ds_path = args.dataset_name or (mapping["path"] if mapping else None)
-    if ds_path is None:
-        raise RuntimeError("dataset_name is required for unknown slot")
-    ds = load_dataset(ds_path, split="train")
-    prompt_col = mapping["prompt_col"] if mapping else None
-    response_col = mapping["response_col"] if mapping else None
-    if prompt_col is None or response_col is None:
+    if mapping:
+        if mapping.get("subset"):
+            ds = load_dataset(mapping["path"], mapping["subset"], split="train")
+        else:
+            ds = load_dataset(mapping["path"], split="train")
+        prompt_col = mapping["prompt_col"]
+        response_col = mapping["response_col"]
+    else:
+        if args.dataset_name is None:
+            raise RuntimeError("dataset_name is required for unknown slot")
+        ds = load_dataset(args.dataset_name, split="train")
         cols = list(ds.features.keys())
-        prompt_col = prompt_col or ("instruction" if "instruction" in cols else cols[0])
-        response_col = response_col or ("output" if "output" in cols else cols[-1])
+        prompt_col = "instruction" if "instruction" in cols else cols[0]
+        response_col = "output" if "output" in cols else cols[-1]
     texts = format_examples(ds, prompt_col, response_col)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tok = AutoTokenizer.from_pretrained(args.model, use_fast=True)

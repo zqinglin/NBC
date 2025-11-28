@@ -7,18 +7,21 @@ from agent import NeuroBayesianAgent
 DATASET_MAPPING = {
     "logic": {
         "path": "microsoft/orca-math-word-problems-200k",
+        "subset": None,
         "prompt_col": "question",
         "response_col": "answer",
     },
     "coder": {
         "path": "nickrosh/Evol-Instruct-Code-80k-v1",
+        "subset": None,
         "prompt_col": "instruction",
         "response_col": "output",
     },
     "persona": {
-        "path": "Proj-Persona/Persona-Instruct",
-        "prompt_col": "instruction",
-        "response_col": "output",
+        "path": "proj-persona/PersonaHub",
+        "subset": "instruction",
+        "prompt_col": "input persona",
+        "response_col": "synthesized text",
     },
 }
 
@@ -53,7 +56,10 @@ def build_stream(num_each):
     streams = []
     for s in ["logic", "coder", "persona"]:
         m = DATASET_MAPPING[s]
-        ds = load_dataset(m["path"], split="train")
+        if m.get("subset"):
+            ds = load_dataset(m["path"], m["subset"], split="train")
+        else:
+            ds = load_dataset(m["path"], split="train")
         ds = ds.select(range(min(num_each, len(ds))))
         texts = format_examples(ds, m["prompt_col"], m["response_col"]) 
         streams.append([(s, t) for t in texts])
