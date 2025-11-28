@@ -27,15 +27,25 @@ class KAB_Thalamus:
         x = input_embedding.detach().cpu().float().view(-1)
         best_slot = None
         best_score = -1e9
+        scores = []
+        dists = []
         for s in self.slots:
             a = float(self.alpha[s].item())
             b = float(self.beta[s].item())
             dist = float(self._cosine_distance(x, self.anchors[s]).item())
             sample = torch.distributions.Beta(a, b).sample().item()
             score = sample * math.exp(-dist)
+            scores.append((s, score))
+            dists.append((s, dist))
             if score > best_score:
                 best_score = score
                 best_slot = s
+        try:
+            sstr = ", ".join([f"{n}={v:.4f}" for n, v in scores])
+            dstr = ", ".join([f"{n}={v:.4f}" for n, v in dists])
+            print(f"[Debug] Scores: {sstr} | Distances: {dstr}")
+        except Exception:
+            pass
         return best_slot
 
     def update_belief(self, slot, reward):
