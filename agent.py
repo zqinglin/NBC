@@ -8,7 +8,7 @@ from transformers import BitsAndBytesConfig
 
 
 class NeuroBayesianAgent:
-    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B-Instruct", slots=None, lora_r=16, quantization="16bit", force_download=False, resume_download=True, cache_dir=None, dtype="bf16"):
+    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B-Instruct", slots=None, lora_r=16, quantization="16bit", force_download=False, resume_download=True, cache_dir=None, dtype="bf16", anchor_data_map=None):
         if slots is None:
             slots = ["logic", "coder", "creative", "persona", "working"]
         self.slots = list(slots)
@@ -61,17 +61,32 @@ class NeuroBayesianAgent:
         self.model.set_adapter(self.slots[0])
         emb_dim = int(self.model.get_input_embeddings().embedding_dim)
         anchors = {}
-        prompts = {
-            "logic": "Reason about rules and logical constraints",
-            "coder": "Write and debug software code",
-            "creative": "Compose imaginative and diverse content",
-            "persona": "Adopt a consistent helpful assistant persona",
-            "working": "Temporary working memory for current conversation"
-        }
-        for s in self.slots:
-            ids = self.tokenizer(prompts.get(s, s), return_tensors="pt").to(self.device)["input_ids"]
-            embs = self.model.get_input_embeddings()(ids)
-            anchors[s] = embs.mean(dim=1).detach().cpu().view(-1)
+        if anchor_data_map:
+            for s in self.slots:
+                texts = anchor_data_map.get(s, [])
+                vecs = []
+                for t in texts[:20]:
+                    ids = self.tokenizer(t, return_tensors="pt").to(self.device)["input_ids"]
+                    embs = self.model.get_input_embeddings()(ids)
+                    vecs.append(embs.mean(dim=1).detach().cpu().view(-1))
+                if len(vecs) == 0:
+                    ids = self.tokenizer(s, return_tensors="pt").to(self.device)["input_ids"]
+                    embs = self.model.get_input_embeddings()(ids)
+                    anchors[s] = embs.mean(dim=1).detach().cpu().view(-1)
+                else:
+                    anchors[s] = sum(vecs) / len(vecs)
+        else:
+            prompts = {
+                "logic": "Reason about rules and logical constraints",
+                "coder": "Write and debug software code",
+                "creative": "Compose imaginative and diverse content",
+                "persona": "Adopt a consistent helpful assistant persona",
+                "working": "Temporary working memory for current conversation"
+            }
+            for s in self.slots:
+                ids = self.tokenizer(prompts.get(s, s), return_tensors="pt").to(self.device)["input_ids"]
+                embs = self.model.get_input_embeddings()(ids)
+                anchors[s] = embs.mean(dim=1).detach().cpu().view(-1)
         self.thalamus = KAB_Thalamus(self.slots, emb_dim, anchors=anchors)
         print("Agent initialized successfully")
 
@@ -93,9 +108,9 @@ class NeuroBayesianAgent:
                 ps.append(p)
         return ps
 
-    def wake_act_learn(self, user_input, ttt_steps=1, surprise_threshold=1.5, lr=5e-4, max_new_tokens=128, sample=False, top_p=0.9, temperature=1.0):
+    def wake_act_learn(self, user_input, ttt_steps=1, surprise_threshold=1.5, lr=5e-4, max_new_tokens=128, sample=False, top_p=0.9, temperature=1.0, active_slot=None):
         x = self._input_embedding(user_input)
-        slot = self.thalamus.route(x)
+        slot = active_slot if active_slot else self.thalamus.route(x)
         self.model.set_adapter(slot)
         enc = self.tokenizer(user_input, return_tensors="pt", padding=True).to(self.device)
         self.model.eval()

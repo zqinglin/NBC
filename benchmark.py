@@ -110,7 +110,9 @@ class HeuristicEvaluator:
             return False
         code = pred_text
         if "```" in pred_text:
-            blocks = re.findall(r"```(?:python|py)?\n([\s\S]*?)```", pred_text, re.IGNORECASE)
+            blocks = re.findall(r"```\s*(?:python|py)?\s*\n([\s\S]*?)```", pred_text, re.IGNORECASE)
+            if not blocks:
+                blocks = re.findall(r"```([\s\S]*?)```", pred_text, re.IGNORECASE)
             if blocks:
                 code = blocks[-1]
         try:
@@ -196,10 +198,25 @@ def main():
     ap.add_argument("--baseline_mode", default="multi-stream")
     args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    agent = NeuroBayesianAgent(model_name=args.model, quantization=args.quant, dtype=args.dtype)
+    anchor_data_map = {}
+    for s in ["logic", "coder", "persona"]:
+        m = DATASET_MAPPING[s]
+        if m.get("subset"):
+            ds0 = load_dataset(m["path"], m["subset"], split="train")
+        else:
+            ds0 = load_dataset(m["path"], split="train")
+        ds0 = ds0.select(range(min(20, len(ds0))))
+        anchor_data_map[s] = [str(ex.get(m["prompt_col"], "")) for ex in ds0]
+    agent = NeuroBayesianAgent(model_name=args.model, quantization=args.quant, dtype=args.dtype, anchor_data_map=anchor_data_map)
     load_warmed_slots(agent, args.slots_dir)
     mixed = MixedDataset(args.num_each, args.stream_len)
     evaluator = HeuristicEvaluator()
+    try:
+        loaded = list(getattr(agent.model, "peft_config", {}).keys())
+        print(f"[Config] baseline_mode={args.baseline_mode}")
+        print(f"[Config] loaded_slots={loaded}")
+    except Exception:
+        pass
     # Zero-shot baseline FWT
     baseline_acc = {"logic": 0.0, "coder": 0.0, "persona": 0.0}
     baseline_count = {"logic": 0, "coder": 0, "persona": 0}
@@ -220,9 +237,8 @@ def main():
     step_logs_path = os.path.join(args.output_dir, "results_stream.jsonl")
     with open(step_logs_path, "w", encoding="utf-8") as wf:
         for idx, (gt, text, gt_ans) in enumerate(mixed):
-            if args.baseline_mode == "single-stream":
-                agent.model.set_adapter("working")
-            out = agent.wake_act_learn(text, ttt_steps=args.ttt_steps, surprise_threshold=args.threshold, lr=args.lr, max_new_tokens=args.max_new_tokens)
+            force_slot = "working" if args.baseline_mode == "single-stream" else None
+            out = agent.wake_act_learn(text, ttt_steps=args.ttt_steps, surprise_threshold=args.threshold, lr=args.lr, max_new_tokens=args.max_new_tokens, active_slot=force_slot)
             sel = out["slot"]
             ra_total += 1
             if sel == gt:
