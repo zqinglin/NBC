@@ -10,22 +10,46 @@ from agent import NeuroBayesianAgent
 
 DATASET_MAPPING = {
     "logic": {
-        "path": "microsoft/orca-math-word-problems-200k",
-        "subset": None,
+        "path": "gsm8k",
+        "subset": "main",
+        "split": "test",
         "prompt_col": "question",
         "response_col": "answer",
     },
     "coder": {
-        "path": "nickrosh/Evol-Instruct-Code-80k-v1",
+        "path": "openai_humaneval",
         "subset": None,
-        "prompt_col": "instruction",
-        "response_col": "output",
+        "split": "test",
+        "prompt_col": "prompt",
+        "response_col": "canonical_solution",
     },
     "persona": {
         "path": "proj-persona/PersonaHub",
         "subset": "instruction",
+        "split": "train",
         "prompt_col": "input persona",
         "response_col": "synthesized text",
+    },
+}
+
+ANCHOR_DATA_MAPPING = {
+    "logic": {
+        "path": "microsoft/orca-math-word-problems-200k",
+        "subset": None,
+        "split": "train",
+        "prompt_col": "question",
+    },
+    "coder": {
+        "path": "nickrosh/Evol-Instruct-Code-80k-v1",
+        "subset": None,
+        "split": "train",
+        "prompt_col": "instruction",
+    },
+    "persona": {
+        "path": "proj-persona/PersonaHub",
+        "subset": "instruction",
+        "split": "train",
+        "prompt_col": "input persona",
     },
 }
 
@@ -65,22 +89,29 @@ class MixedDataset:
         for s in ["logic", "coder", "persona"]:
             m = DATASET_MAPPING[s]
             if m.get("subset"):
-                ds = load_dataset(m["path"], m["subset"], split="train")
+                ds = load_dataset(m["path"], m["subset"], split=m.get("split", "train"))
             else:
-                ds = load_dataset(m["path"], split="train")
+                ds = load_dataset(m["path"], split=m.get("split", "train"))
             ds = ds.select(range(min(num_each, len(ds))))
             for ex in ds:
                 p = ex.get(m["prompt_col"], "")
                 r = ex.get(m["response_col"], "")
-                if isinstance(r, list):
-                    if len(r) and isinstance(r[0], dict):
-                        r_text = "\n".join([str(mo.get("content", "")) for mo in r])
-                    else:
-                        r_text = "\n".join([str(x) for x in r])
+                if s == "logic":
+                    inp = f"Question: {str(p)}\nAnswer:"
+                    ref = str(r)
+                elif s == "coder":
+                    inp = str(p)
+                    ref = str(r)
                 else:
-                    r_text = str(r)
-                text = f"Instruction: {str(p)}\nResponse: {r_text}"
-                self.items.append((s, text, r_text))
+                    if isinstance(r, list):
+                        if len(r) and isinstance(r[0], dict):
+                            ref = "\n".join([str(mo.get("content", "")) for mo in r])
+                        else:
+                            ref = "\n".join([str(x) for x in r])
+                    else:
+                        ref = str(r)
+                    inp = f"Instruction: {str(p)}\nResponse: {ref}"
+                self.items.append((s, inp, ref))
         random.shuffle(self.items)
         if self.stream_len is not None:
             self.items = self.items[:self.stream_len]
@@ -92,20 +123,28 @@ class HeuristicEvaluator:
     def __init__(self):
         pass
     def _extract_number(self, s):
-        nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
+        nums = re.findall(r"[-+]?\d[\d,]*\.?\d*", s)
         if not nums:
             return None
         try:
-            return float(nums[-1])
+            return float(nums[-1].replace(",", ""))
         except Exception:
             return None
+    def _extract_gsm8k_ref(self, s):
+        m = re.search(r"####\s*(-?\d[\d,]*\.?\d*)", s)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+        return self._extract_number(s)
     def eval_logic(self, pred_text, gt_text):
         p = self._extract_number(pred_text or "")
-        g = self._extract_number(gt_text or "")
+        g = self._extract_gsm8k_ref(gt_text or "")
         if p is None or g is None:
             return False
         return abs(p - g) < 1e-6
-    def eval_coder(self, pred_text):
+    def eval_coder(self, pred_text, gt_text=None):
         if not isinstance(pred_text, str) or len(pred_text) == 0:
             return False
         code = pred_text
@@ -118,7 +157,14 @@ class HeuristicEvaluator:
         try:
             ast.parse(code)
             has_kw = ("def" in code) or ("return" in code)
-            return has_kw
+            ok = has_kw
+            if isinstance(gt_text, str) and len(gt_text):
+                m = re.search(r"def\s+([A-Za-z_]\w*)\s*\(", gt_text)
+                if m:
+                    fn = m.group(1)
+                    if fn not in code:
+                        ok = ok and True
+            return ok
         except Exception:
             return False
     def eval_persona(self, pred_text):
@@ -127,7 +173,7 @@ class HeuristicEvaluator:
         if task_type == "logic":
             return self.eval_logic(pred_text, gt_text)
         if task_type == "coder":
-            return self.eval_coder(pred_text)
+            return self.eval_coder(pred_text, gt_text)
         if task_type == "persona":
             return self.eval_persona(pred_text)
         return False
@@ -200,11 +246,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     anchor_data_map = {}
     for s in ["logic", "coder", "persona"]:
-        m = DATASET_MAPPING[s]
+        m = ANCHOR_DATA_MAPPING[s]
         if m.get("subset"):
-            ds0 = load_dataset(m["path"], m["subset"], split="train")
+            ds0 = load_dataset(m["path"], m["subset"], split=m.get("split", "train"))
         else:
-            ds0 = load_dataset(m["path"], split="train")
+            ds0 = load_dataset(m["path"], split=m.get("split", "train"))
         ds0 = ds0.select(range(min(20, len(ds0))))
         anchor_data_map[s] = [str(ex.get(m["prompt_col"], "")) for ex in ds0]
     agent = NeuroBayesianAgent(model_name=args.model, quantization=args.quant, dtype=args.dtype, anchor_data_map=anchor_data_map)
